@@ -108,3 +108,18 @@ export const getMyProducts = async (req, res) => {
   const products = await Product.find({ seller: req.user._id });
   res.json(products);
 };
+export const sellerStockStats = async (req, res) => {
+  const sellerId = req.user._id;
+
+  const products = await Product.find({ seller: sellerId });
+
+  const totalProducts = products.length;
+  const outOfStock = products.filter(p => p.stock === 0).length;
+  const lowStock = products.filter(p => p.stock > 0 && p.stock <= 5).length;
+
+  res.json({
+    totalProducts,
+    outOfStock,
+    lowStock,
+  });
+};

@@ -1,3 +1,4 @@
+// backend/routes/paymentRoutes.js
 import express from "express";
 import Stripe from "stripe";
 import { protect } from "../middleware/authMiddleware.js";
@@ -18,13 +19,10 @@ router.post("/create-checkout-session", protect, async (req, res) => {
       return res.status(400).json({ message: "No items found" });
     }
 
-    // Stripe line items
     const line_items = items.map((i) => ({
       price_data: {
         currency: "inr",
-        product_data: {
-          name: i.title,
-        },
+        product_data: { name: i.title },
         unit_amount: Math.round(i.price * 100),
       },
       quantity: i.qty,
@@ -33,14 +31,11 @@ router.post("/create-checkout-session", protect, async (req, res) => {
     const session = await stripe.checkout.sessions.create({
       mode: "payment",
       payment_method_types: ["card"],
-
       line_items,
 
-      // Successful redirect page
       success_url: `${process.env.CLIENT_URL}/payment-success?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${process.env.CLIENT_URL}/payment-cancel`,
 
-      // ⚠ KEEP METADATA VERY SMALL
       metadata: {
         userId: req.user._id.toString(),
         addressId: addressId || "",
@@ -48,6 +43,7 @@ router.post("/create-checkout-session", protect, async (req, res) => {
     });
 
     return res.json({ url: session.url });
+
   } catch (err) {
     console.error("Stripe session creation failed:", err);
     return res.status(500).json({ message: "Stripe checkout error" });
@@ -56,7 +52,7 @@ router.post("/create-checkout-session", protect, async (req, res) => {
 
 
 // ----------------------------------------
-// VERIFY PAYMENT + CREATE ORDER
+// VERIFY PAYMENT + CREATE ORDER (DUPLICATE SAFE)
 // ----------------------------------------
 router.post("/verify", protect, async (req, res) => {
   try {
@@ -71,27 +67,38 @@ router.post("/verify", protect, async (req, res) => {
       return res.status(400).json({ message: "Payment not completed" });
     }
 
-    const userId = session.metadata.userId;
+    const paymentIntent = session.payment_intent;
 
-    // Fetch user and snapshot the address
+    //   DUPLICATE ORDER PROTECTION — VERY IMPORTANT
+    const existingOrder = await Order.findOne({ paymentIntentId: paymentIntent });
+
+    if (existingOrder) {
+      console.log("⚠️ Duplicate prevented — order already exists");
+      return res.json({ success: true, orderId: existingOrder._id });
+    }
+
+    // ----------------------------------------------------------------
+    // FETCH USER + ADDRESS SNAPSHOT
+    // ----------------------------------------------------------------
+    const userId = session.metadata.userId;
     const user = await User.findById(userId).select("addresses");
 
     let addressSnapshot = null;
+    const selectedAddress = user.addresses.id(addressId);
 
-    const addr = user.addresses.id(addressId);
-    if (addr) {
+    if (selectedAddress) {
       addressSnapshot = {
-        name: addr.name,
-        phone: addr.phone,
-        addressLine: addr.addressLine,
-        city: addr.city,
-        state: addr.state,
-        pincode: addr.pincode,
-        landmark: addr.landmark,
+        name: selectedAddress.name,
+        phone: selectedAddress.phone,
+        addressLine: selectedAddress.addressLine,
+        city: selectedAddress.city,
+        state: selectedAddress.state,
+        pincode: selectedAddress.pincode,
+        landmark: selectedAddress.landmark,
       };
     }
 
-    // If no address selected → use default
+    // Use default address if no selection
     if (!addressSnapshot) {
       const def = user.addresses.find((a) => a.isDefault);
       if (def) {
@@ -107,52 +114,50 @@ router.post("/verify", protect, async (req, res) => {
       }
     }
 
-    // Prepare order items
-    // ----------------------------------------
-// Prepare order items (merge duplicates)
-// ----------------------------------------
-const mergedMap = new Map();
+    // ----------------------------------------------------------------
+    // MERGE DUPLICATE CART ITEMS (SAFE)
+    // ----------------------------------------------------------------
+    const mergedMap = new Map();
 
-// If the same product appears twice in `items`,
-// we merge it into one with qty summed.
-for (const i of items) {
-  const key = String(i._id); // product id as string
+    for (const i of items) {
+      const key = String(i._id);
 
-  if (!mergedMap.has(key)) {
-    mergedMap.set(key, {
-      product: i._id,
-      title: i.title,
-      images: i.images || [],
-      price: i.price,
-      qty: i.qty,
-      seller: i.seller || null,
+      if (!mergedMap.has(key)) {
+        mergedMap.set(key, {
+          product: i._id,
+          title: i.title,
+          images: i.images || [],
+          price: i.price,
+          qty: i.qty,
+          seller: i.seller || null,
+        });
+      } else {
+        mergedMap.get(key).qty += i.qty;
+      }
+    }
+
+    const orderItems = Array.from(mergedMap.values());
+
+    const totalAmount = orderItems.reduce(
+      (sum, x) => sum + x.price * x.qty,
+      0
+    );
+
+    // ----------------------------------------------------------------
+    // CREATE ORDER
+    // ----------------------------------------------------------------
+    const order = await Order.create({
+      user: userId,
+      items: orderItems,
+      totalAmount,
+      status: "processing",
+      paymentStatus: "paid",
+      paymentIntentId: paymentIntent, // ⭐ required for duplicate prevention
+      address: addressSnapshot,
     });
-  } else {
-    const existing = mergedMap.get(key);
-    existing.qty += i.qty; // add quantities
-  }
-}
-
-const orderItems = Array.from(mergedMap.values());
-
-const totalAmount = orderItems.reduce(
-  (sum, x) => sum + x.price * x.qty,
-  0
-);
-
-const order = await Order.create({
-  user: userId,
-  items: orderItems,
-  totalAmount,
-  status: "processing",
-  paymentStatus: "paid",
-  paymentIntentId: session.payment_intent,
-  address: addressSnapshot,
-});
-
-   
 
     return res.json({ success: true, orderId: order._id });
+
   } catch (err) {
     console.error("Order verify error:", err);
     return res.status(500).json({ message: "Order verification failed" });

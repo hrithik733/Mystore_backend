@@ -2,47 +2,47 @@ import Review from "../models/Review.js";
 import Order from "../models/Order.js";
 import Product from "../models/Product.js";
 
-// ⭐ USER – Create Review
+// ⭐ USER – Create Review (ORDER-BASED)
 export const createReview = async (req, res) => {
   try {
-    const { productId, rating, comment } = req.body;
+    const { productId, orderId, rating, comment } = req.body;
 
-    // ✅ Just check: has this user ever ordered this product?
+    // ✅ Order must belong to user + delivered + contain product
     const order = await Order.findOne({
+      _id: orderId,
       user: req.user._id,
+      status: "delivered",
       "items.product": productId,
-      //  removed strict status check to avoid blocking
-      // status: "delivered",
     });
 
     if (!order) {
       return res
         .status(400)
-        .json({ message: "You cannot review this product" });
+        .json({ message: "You can review only after delivery" });
     }
 
-    // Prevent duplicate review
+    // ❌ Prevent duplicate review for SAME ORDER
     const existing = await Review.findOne({
       user: req.user._id,
       product: productId,
+      orderId,
     });
 
     if (existing) {
       return res
         .status(400)
-        .json({ message: "You already reviewed this product" });
+        .json({ message: "Review already submitted for this order" });
     }
 
-    // Create review
     const review = await Review.create({
       user: req.user._id,
       product: productId,
+      orderId,
       rating,
       comment,
-      orderId: order._id,
     });
 
-    // ⭐ Link review to product.reviews[]
+    // Link review to product
     await Product.findByIdAndUpdate(productId, {
       $push: { reviews: review._id },
     });
@@ -53,6 +53,7 @@ export const createReview = async (req, res) => {
     res.status(500).json({ message: "Failed to create review" });
   }
 };
+
 
 
 
